@@ -31,7 +31,11 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
+
+# Firebase Admin service account
+chatrio-bbf44-firebase-adminsdk-*.json
 
 # typescript
 *.tsbuildinfo
