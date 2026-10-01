@@ -1,25 +1,108 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "Chatrio",
+    "slug": "chatrio",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "icon": "./assets/chatrio-logo.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "chatrio",
+    "splash": {
+      "image": "./assets/chatrio-logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F0F14",
+      "dark": {
+        "image": "./assets/chatrio-logo.png",
+        "backgroundColor": "#0F0F14"
+      }
+    },
+
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "dev.chatrio.app"
     },
+
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
-      "predictiveBackGestureEnabled": false
+      "softwareKeyboardLayoutMode": "resize",
+      "package": "dev.chatrio.app",
+      "googleServicesFile": "./google-services.json",
+
+      "predictiveBackGestureEnabled": false,
+
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.POST_NOTIFICATIONS"
+      ]
     },
+
+    "androidNavigationBar": {
+      "backgroundColor": "#0F0F12",
+      "barStyle": "light-content",
+      "enforceContrast": false
+    },
+
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/chatrio-logo.png",
+          "imageWidth": 160,
+          "resizeMode": "contain",
+          "backgroundColor": "#0F0F14",
+          "dark": {
+            "image": "./assets/chatrio-logo.png",
+            "backgroundColor": "#0F0F14"
+          }
+        }
+      ],
+
+      [
+        "expo-dev-client",
+        {
+          "launchMode": "most-recent",
+          "android": {
+            "defaultLaunchURL": "http://10.204.139.129:8081"
+          }
+        }
+      ],
+
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/chatrio-logo.png",
+          "color": "#6366F1",
+          "defaultChannel": "messages",
+          "iosDisplayInForeground": true,
+          "sounds": []
+        }
+      ],
+
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Chatrio needs access to your photos to share images.",
+          "cameraPermission": "Chatrio needs access to your camera to take photos."
+        }
+      ]
+    ],
+
+    "experiments": {
+      "typedRoutes": true
+    },
+
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "d29f12eb-5d05-40b4-b4ae-bff138ccbdce"
+      }
     }
   }
 }
