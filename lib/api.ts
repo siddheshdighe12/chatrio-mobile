@@ -49,6 +49,14 @@ api.interceptors.request.use(
   async (config) => {
     const { accessToken } = useAuthStore.getState();
 
+    // When the body is FormData, remove the default Content-Type so that
+    // React Native's native XHR can set "multipart/form-data; boundary=..."
+    // automatically. If we leave "application/json" here the server receives
+    // no boundary and throws FST_INVALID_MULTIPART_CONTENT_TYPE.
+    if (config.data instanceof FormData) {
+      delete config.headers['Content-Type'];
+    }
+
     console.log(
       '[API REQUEST]',
       config.method?.toUpperCase(),
