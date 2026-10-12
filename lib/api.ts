@@ -10,10 +10,31 @@ import { useAuthStore } from '../store/authStore';
  *
  * For simulator/emulator: http://localhost:3000
  *
- * Override via environment variable in app.config.ts (see README).
+ * Override via EXPO_PUBLIC_API_URL.
  */
 const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
+
+// ── Debug: show the API URL used by the running app ─────────────────────────
+console.log('[API BASE URL]', BASE_URL);
+
+// ── Debug: test native Android fetch connectivity ───────────────────────────
+fetch(`${BASE_URL}/health`)
+  .then(async (res) => {
+    const text = await res.text();
+
+    console.log(
+      '[FETCH HEALTH]',
+      res.status,
+      text,
+    );
+  })
+  .catch((err) => {
+    console.log(
+      '[FETCH HEALTH ERROR]',
+      err?.message ?? err,
+    );
+  });
 
 export const api = axios.create({
   baseURL: BASE_URL,
@@ -27,35 +48,74 @@ export const api = axios.create({
 api.interceptors.request.use(
   async (config) => {
     const { accessToken } = useAuthStore.getState();
+
+    console.log(
+      '[API REQUEST]',
+      config.method?.toUpperCase(),
+      `${BASE_URL}${config.url}`,
+      'HAS_TOKEN:',
+      !!accessToken,
+    );
+
     if (accessToken) {
       config.headers.Authorization = `Bearer ${accessToken}`;
     }
+
     return config;
   },
-  (error) => Promise.reject(error),
+  (error) => {
+    console.log('[API REQUEST SETUP ERROR]', error);
+
+    return Promise.reject(error);
+  },
 );
 
 // ── Response interceptor — handle 401, refresh token ────────────────────────
 let isRefreshing = false;
+
 let refreshQueue: Array<{
   resolve: (token: string) => void;
   reject: (error: unknown) => void;
 }> = [];
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    console.log(
+      '[API RESPONSE]',
+      response.status,
+      response.config.method?.toUpperCase(),
+      response.config.url,
+    );
+
+    return response;
+  },
+
   async (error) => {
     const original = error.config;
+
+    console.log(
+      '[API ERROR]',
+      error.message,
+      error.code,
+      error.response?.status,
+      error.config?.method?.toUpperCase(),
+      error.config?.url,
+    );
 
     if (error.response?.status === 401 && !original._retry) {
       original._retry = true;
 
+      // Another request is already refreshing the token.
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
-          refreshQueue.push({ resolve, reject });
+          refreshQueue.push({
+            resolve,
+            reject,
+          });
         })
           .then((token) => {
             original.headers.Authorization = `Bearer ${token}`;
+
             return api(original);
           })
           .catch((err) => Promise.reject(err));
@@ -64,28 +124,66 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        const refreshToken = await SecureStore.getItemAsync('chatrio_refresh_token');
-        if (!refreshToken) throw new Error('No refresh token');
+        const refreshToken = await SecureStore.getItemAsync(
+          'chatrio_refresh_token',
+        );
 
-        const { data } = await axios.post(`${BASE_URL}/auth/refresh`, {
-          refreshToken,
-        });
+        console.log(
+          '[API REFRESH]',
+          'HAS_REFRESH_TOKEN:',
+          !!refreshToken,
+        );
+
+        if (!refreshToken) {
+          throw new Error('No refresh token');
+        }
+
+        const { data } = await axios.post(
+          `${BASE_URL}/auth/refresh`,
+          {
+            refreshToken,
+          },
+        );
+
+        console.log('[API REFRESH SUCCESS]');
 
         const newAccessToken: string = data.accessToken;
-        const { setAuth, user } = useAuthStore.getState();
-        if (user) setAuth(user, newAccessToken);
 
-        refreshQueue.forEach(({ resolve }) => resolve(newAccessToken));
+        const { setAuth, user } = useAuthStore.getState();
+
+        if (user) {
+          setAuth(user, newAccessToken);
+        }
+
+        // Resolve all requests waiting for the refresh.
+        refreshQueue.forEach(({ resolve }) => {
+          resolve(newAccessToken);
+        });
+
         refreshQueue = [];
 
+        // Retry the original request with the new token.
         original.headers.Authorization = `Bearer ${newAccessToken}`;
+
         return api(original);
       } catch (refreshError) {
-        refreshQueue.forEach(({ reject }) => reject(refreshError));
+        console.log(
+          '[API REFRESH ERROR]',
+          refreshError instanceof Error
+            ? refreshError.message
+            : refreshError,
+        );
+
+        // Reject all queued requests.
+        refreshQueue.forEach(({ reject }) => {
+          reject(refreshError);
+        });
+
         refreshQueue = [];
 
-        // Clear auth state — user must log in again
+        // Clear auth state — user must log in again.
         await useAuthStore.getState().clearAuth();
+
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
