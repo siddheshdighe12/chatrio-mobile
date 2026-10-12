@@ -93,9 +93,7 @@ export default function CreateGroupScreen() {
 
     setIsUploadingAvatar(true);
     try {
-      const res = await api.post('/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      const res = await api.post('/upload', formData);
       setGroupAvatarUrl(res.data.url);
     } catch (err: any) {
       Alert.alert('Upload Error', err?.message || 'Failed to upload group photo');

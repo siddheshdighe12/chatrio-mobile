@@ -417,7 +417,7 @@ export default function ChatScreen() {
     formData.append('file', { uri, name: filename, type: mimeType } as any);
     try {
       setIsUploading(true);
-      const uploadRes = await api.post('/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const uploadRes = await api.post('/upload', formData);
       const uploaded = uploadRes.data;
       const payload = {
         type: 'IMAGE',
@@ -466,7 +466,7 @@ export default function ChatScreen() {
     formData.append('file', { uri: file.uri, name: file.name, type: file.mimeType } as any);
     try {
       setIsUploading(true);
-      const uploadRes = await api.post('/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const uploadRes = await api.post('/upload', formData);
       const uploaded = uploadRes.data;
       const payload = {
         type: 'FILE',

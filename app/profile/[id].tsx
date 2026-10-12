@@ -190,9 +190,7 @@ export default function ProfileScreen() {
 
     setIsUploadingPhoto(true);
     try {
-      const res = await api.post('/users/avatar', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      const res = await api.post('/users/avatar', formData);
       updateUser({ avatarUrl: res.data.avatarUrl });
       setProfile((prev) => (prev ? { ...prev, avatarUrl: res.data.avatarUrl } : null));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);

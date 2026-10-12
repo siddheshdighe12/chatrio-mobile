@@ -121,9 +121,7 @@ export default function GroupInfoScreen() {
     formData.append('file', { uri, name: filename, type: mimeType } as any);
 
     try {
-      const uploadRes = await api.post('/users/avatar', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      const uploadRes = await api.post('/users/avatar', formData);
       const newAvatarUrl = uploadRes.data.avatarUrl;
       const updateRes = await api.patch(`/conversations/${id}`, { avatarUrl: newAvatarUrl });
       setConversation(updateRes.data);
