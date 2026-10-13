@@ -417,7 +417,21 @@ export default function ChatScreen() {
     formData.append('file', { uri, name: filename, type: mimeType } as any);
     try {
       setIsUploading(true);
-      const uploadRes = await api.post('/upload', formData);
+      // ── Upload diagnostics (no tokens/secrets logged) ──────────────────────
+      const uploadPath = '/upload';
+      console.log('[UPLOAD] PRE-REQUEST', {
+        baseURL: process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000',
+        path: uploadPath,
+        filename,
+        mimeType,
+        timeout: 60000,
+      });
+      const uploadRes = await api.post(uploadPath, formData, { timeout: 60000 });
+      console.log('[UPLOAD] SUCCESS', {
+        status: uploadRes.status,
+        data: uploadRes.data,
+      });
+      // ──────────────────────────────────────────────────────────────────────
       const uploaded = uploadRes.data;
       const payload = {
         type: 'IMAGE',
@@ -439,6 +453,16 @@ export default function ChatScreen() {
       }
       setTimeout(() => scrollToBottom(true), 60);
     } catch (err: any) {
+      // ── Upload error diagnostics (no tokens/secrets logged) ───────────────
+      console.log('[UPLOAD] ERROR', {
+        message: err?.message,
+        code: err?.code,
+        status: err?.response?.status,
+        data: err?.response?.data,
+        baseURL: process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000',
+        path: '/upload',
+      });
+      // ─────────────────────────────────────────────────────────────────────
       Alert.alert('Upload Error', err?.message || 'Failed to upload image');
     } finally {
       setIsUploading(false);
@@ -466,7 +490,21 @@ export default function ChatScreen() {
     formData.append('file', { uri: file.uri, name: file.name, type: file.mimeType } as any);
     try {
       setIsUploading(true);
-      const uploadRes = await api.post('/upload', formData);
+      // ── Upload diagnostics (no tokens/secrets logged) ──────────────────────
+      const uploadPath = '/upload';
+      console.log('[UPLOAD] PRE-REQUEST', {
+        baseURL: process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000',
+        path: uploadPath,
+        filename: file.name,
+        mimeType: file.mimeType,
+        timeout: 60000,
+      });
+      const uploadRes = await api.post(uploadPath, formData, { timeout: 60000 });
+      console.log('[UPLOAD] SUCCESS', {
+        status: uploadRes.status,
+        data: uploadRes.data,
+      });
+      // ──────────────────────────────────────────────────────────────────────
       const uploaded = uploadRes.data;
       const payload = {
         type: 'FILE',
@@ -488,6 +526,16 @@ export default function ChatScreen() {
       }
       setTimeout(() => scrollToBottom(true), 60);
     } catch (err: any) {
+      // ── Upload error diagnostics (no tokens/secrets logged) ───────────────
+      console.log('[UPLOAD] ERROR', {
+        message: err?.message,
+        code: err?.code,
+        status: err?.response?.status,
+        data: err?.response?.data,
+        baseURL: process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000',
+        path: '/upload',
+      });
+      // ─────────────────────────────────────────────────────────────────────
       Alert.alert('File Error', err?.message || 'Failed to upload file');
     } finally {
       setIsUploading(false);

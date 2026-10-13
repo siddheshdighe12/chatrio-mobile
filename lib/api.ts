@@ -38,7 +38,9 @@ fetch(`${BASE_URL}/health`)
 
 export const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 10000,
+  // 30 s covers Render free-tier cold-starts (~15–30 s).
+  // Upload calls override this to 60 s via per-request config.
+  timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
   },
