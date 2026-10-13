@@ -801,11 +801,23 @@ export default function ChatScreen() {
             )}
 
             {/* Image */}
-            {item.type === 'IMAGE' && item.attachments?.[0] && (
-              <TouchableOpacity onPress={() => setPreviewImageUrl(resolveMediaUrl(item.attachments![0].url))} activeOpacity={0.9}>
-                <Image source={{ uri: resolveMediaUrl(item.attachments[0].url) }} style={styles.messageImage} contentFit="cover" transition={200} />
-              </TouchableOpacity>
-            )}
+            {item.type === 'IMAGE' && item.attachments?.[0] && (() => {
+              const resolvedImgUrl = resolveMediaUrl(item.attachments[0].url);
+              // ── Diagnostic (safe — no tokens/secrets) ──────────────────────
+              console.log('[IMAGE RENDER]', { rawUrl: item.attachments[0].url, resolvedUrl: resolvedImgUrl });
+              // ───────────────────────────────────────────────────────────────
+              return (
+                <TouchableOpacity onPress={() => setPreviewImageUrl(resolvedImgUrl)} activeOpacity={0.9}>
+                  <Image
+                    source={{ uri: resolvedImgUrl }}
+                    style={styles.messageImage}
+                    contentFit="cover"
+                    transition={200}
+                    onError={(e) => console.log('[IMAGE LOAD ERROR]', { url: resolvedImgUrl, error: (e as any)?.error ?? e })}
+                  />
+                </TouchableOpacity>
+              );
+            })()}
 
             {/* File — tappable to open/download */}
             {item.type === 'FILE' && item.attachments?.[0] && (
