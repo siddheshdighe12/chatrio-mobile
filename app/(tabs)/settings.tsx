@@ -23,6 +23,7 @@ import { FontSize, Spacing, Radius } from '../../constants/Typography';
 import { useAuthStore } from '../../store/authStore';
 import { useThemeStore } from '../../store/themeStore';
 import { api } from '../../lib/api';
+import { authStorage } from '../../lib/authStorage';
 import { unregisterPushTokenAsync } from '../../lib/notifications';
 import { Avatar } from '../../components/Avatar';
 import { UserSummary } from '../../types/chat';
@@ -65,7 +66,8 @@ export default function SettingsScreen() {
             await unregisterPushTokenAsync();
           } catch {}
           try {
-            await api.post('/auth/logout');
+            const refreshToken = await authStorage.getRefreshToken();
+            await api.post('/auth/logout', { refreshToken });
           } catch {}
           await clearAuth();
         },

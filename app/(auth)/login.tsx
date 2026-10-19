@@ -13,7 +13,6 @@ import {
   Image,
 } from 'react-native';
 import { Link, useRouter } from 'expo-router';
-import * as SecureStore from 'expo-secure-store';
 import { LightColors, DarkColors } from '../../constants/Colors';
 import { FontSize, Spacing, Radius } from '../../constants/Typography';
 import { api } from '../../lib/api';
@@ -50,12 +49,7 @@ export default function LoginScreen() {
 
       const { user, accessToken, refreshToken } = response.data;
 
-      await SecureStore.setItemAsync(
-        'chatrio_refresh_token',
-        refreshToken
-      );
-
-      setAuth(user, accessToken);
+      await setAuth(user, accessToken, refreshToken);
       router.replace('/(tabs)/chats');
     } catch (err: any) {
       const msg =

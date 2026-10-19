@@ -75,6 +75,17 @@ export function disconnectSocket() {
   }
 }
 
+export function updateSocketToken(token: string) {
+  if (socket) {
+    socket.auth = {
+      token: token ? `Bearer ${token}` : '',
+    };
+    if (!socket.connected) {
+      socket.connect();
+    }
+  }
+}
+
 export function emitTypingStart(conversationId: string) {
   socket?.emit('typing:start', { conversationId });
 }

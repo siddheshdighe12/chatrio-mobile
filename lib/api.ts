@@ -1,5 +1,6 @@
 import axios from 'axios';
-import * as SecureStore from 'expo-secure-store';
+import { authStorage } from './authStorage';
+import { updateSocketToken } from './socket';
 import { useAuthStore } from '../store/authStore';
 
 /**
@@ -134,9 +135,7 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        const refreshToken = await SecureStore.getItemAsync(
-          'chatrio_refresh_token',
-        );
+        const refreshToken = await authStorage.getRefreshToken();
 
         console.log(
           '[API REFRESH]',
@@ -159,11 +158,8 @@ api.interceptors.response.use(
 
         const newAccessToken: string = data.accessToken;
 
-        const { setAuth, user } = useAuthStore.getState();
-
-        if (user) {
-          setAuth(user, newAccessToken);
-        }
+        await useAuthStore.getState().setAccessToken(newAccessToken);
+        updateSocketToken(newAccessToken);
 
         // Resolve all requests waiting for the refresh.
         refreshQueue.forEach(({ resolve }) => {
@@ -176,7 +172,7 @@ api.interceptors.response.use(
         original.headers.Authorization = `Bearer ${newAccessToken}`;
 
         return api(original);
-      } catch (refreshError) {
+      } catch (refreshError: any) {
         console.log(
           '[API REFRESH ERROR]',
           refreshError instanceof Error
@@ -191,8 +187,20 @@ api.interceptors.response.use(
 
         refreshQueue = [];
 
-        // Clear auth state — user must log in again.
-        await useAuthStore.getState().clearAuth();
+        // Clear auth state ONLY when the backend definitively rejects the token (401/403)
+        // or if no refresh token was found.
+        // For transient errors (network offline, timeouts, Render cold-start 502/503),
+        // keep stored credentials intact so the app can recover when online.
+        const status = refreshError?.response?.status;
+        const isDefinitiveAuthFailure =
+          status === 401 || status === 403 || refreshError?.message === 'No refresh token';
+
+        if (isDefinitiveAuthFailure) {
+          console.log('[API REFRESH] Definitive rejection from server. Clearing auth state.');
+          await useAuthStore.getState().clearAuth();
+        } else {
+          console.log('[API REFRESH] Transient network/server error. Retaining stored credentials.');
+        }
 
         return Promise.reject(refreshError);
       } finally {

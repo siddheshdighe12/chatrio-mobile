@@ -1,5 +1,8 @@
 import { create } from 'zustand';
-import * as SecureStore from 'expo-secure-store';
+import axios from 'axios';
+import { authStorage } from '../lib/authStorage';
+
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
 
 export interface AuthUser {
   id: string;
@@ -20,13 +23,13 @@ interface AuthState {
   isAuthenticated: boolean;
 
   // Actions
-  setAuth: (user: AuthUser, accessToken: string) => void;
+  setAuth: (user: AuthUser, accessToken: string, refreshToken?: string) => Promise<void>;
+  setUser: (user: AuthUser) => Promise<void>;
+  setAccessToken: (accessToken: string) => Promise<void>;
   updateUser: (updates: Partial<AuthUser>) => void;
   clearAuth: () => Promise<void>;
   loadStoredAuth: () => Promise<void>;
 }
-
-const ACCESS_TOKEN_KEY = 'chatrio_access_token';
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
@@ -34,33 +37,118 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   isLoading: true,
   isAuthenticated: false,
 
-  setAuth: (user, accessToken) => {
-    SecureStore.setItemAsync(ACCESS_TOKEN_KEY, accessToken).catch(console.error);
+  setAuth: async (user, accessToken, refreshToken) => {
+    try {
+      await authStorage.saveAuth(user, accessToken, refreshToken);
+    } catch (e) {
+      console.warn('[authStore] Failed to save auth to storage:', e);
+    }
     set({ user, accessToken, isAuthenticated: true, isLoading: false });
+  },
+
+  setUser: async (user) => {
+    try {
+      await authStorage.setUser(user);
+    } catch (e) {
+      console.warn('[authStore] Failed to save user to storage:', e);
+    }
+    set({ user });
+  },
+
+  setAccessToken: async (accessToken) => {
+    try {
+      await authStorage.setAccessToken(accessToken);
+    } catch (e) {
+      console.warn('[authStore] Failed to save accessToken to storage:', e);
+    }
+    set({ accessToken, isAuthenticated: true });
   },
 
   updateUser: (updates) => {
     const current = get().user;
     if (current) {
-      set({ user: { ...current, ...updates } });
+      const updated = { ...current, ...updates };
+      authStorage.setUser(updated).catch(() => {});
+      set({ user: updated });
     }
   },
 
   clearAuth: async () => {
-    await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY).catch(console.error);
+    try {
+      await authStorage.clearAll();
+    } catch (e) {
+      console.warn('[authStore] Failed to clear storage:', e);
+    }
     set({ user: null, accessToken: null, isAuthenticated: false, isLoading: false });
   },
 
   loadStoredAuth: async () => {
     try {
-      const token = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
+      const [token, refreshToken, cachedUser] = await Promise.all([
+        authStorage.getAccessToken(),
+        authStorage.getRefreshToken(),
+        authStorage.getUser(),
+      ]);
+
       if (token) {
-        set({ accessToken: token, isLoading: false });
-        // Note: actual user validation happens in the root layout via /users/me
-      } else {
-        set({ isLoading: false });
+        // Mark as authenticated optimistically with any cached user profile.
+        // The root layout's /auth/me effect will validate the token against the backend.
+        set({
+          accessToken: token,
+          user: cachedUser,
+          isAuthenticated: true,
+          isLoading: false,
+        });
+        return;
       }
-    } catch {
+
+      // If access token is missing or failed to read, but we have a refresh token,
+      // attempt session restoration immediately before giving up.
+      if (refreshToken) {
+        console.log('[authStore] Access token missing but refresh token exists. Attempting restoration...');
+        try {
+          const res = await axios.post(
+            `${BASE_URL}/auth/refresh`,
+            { refreshToken },
+            { timeout: 15000 },
+          );
+          const newAccessToken: string = res.data.accessToken;
+          await authStorage.setAccessToken(newAccessToken);
+          set({
+            accessToken: newAccessToken,
+            user: cachedUser,
+            isAuthenticated: true,
+            isLoading: false,
+          });
+          return;
+        } catch (refreshErr: any) {
+          const status = refreshErr?.response?.status;
+          console.warn(
+            '[authStore] Session restoration via refresh token failed:',
+            status ?? refreshErr?.message,
+          );
+          if (status === 401 || status === 403) {
+            // Refresh token revoked or expired on server
+            await authStorage.clearAll();
+            set({ user: null, accessToken: null, isAuthenticated: false, isLoading: false });
+            return;
+          }
+          // Transient network error or server cold start:
+          // Keep the session optimistically authenticated so the user is not kicked to login screen when offline.
+          set({
+            accessToken: null,
+            user: cachedUser,
+            isAuthenticated: true,
+            isLoading: false,
+          });
+          return;
+        }
+      }
+
+      // No credentials found
+      set({ user: null, accessToken: null, isAuthenticated: false, isLoading: false });
+    } catch (err: any) {
+      console.warn('[authStore] loadStoredAuth unexpected error:', err?.message ?? err);
       set({ isLoading: false });
     }
   },

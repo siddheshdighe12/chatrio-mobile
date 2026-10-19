@@ -34,6 +34,7 @@ import { useThemeColors } from '../../hooks/useThemeColors';
 import { FontSize, Spacing, Radius } from '../../constants/Typography';
 import { useAuthStore } from '../../store/authStore';
 import { useChatStore } from '../../store/chatStore';
+import { useCallStore } from '../../store/callStore';
 import { api } from '../../lib/api';
 import {
   getSocket,
@@ -231,6 +232,25 @@ export default function ChatScreen() {
     scrollToBottom(true);
     hideNewMessageButton();
   }, [scrollToBottom, hideNewMessageButton]);
+
+  const handleStartCall = async (type: 'AUDIO' | 'VIDEO') => {
+    if (!conversation?.otherUser) {
+      Alert.alert('Cannot Call', 'User details not available');
+      return;
+    }
+    const callId = await useCallStore.getState().initiateCall(
+      conversationId,
+      type,
+      {
+        id: conversation.otherUser.id,
+        displayName: conversation.otherUser.displayName || conversation.name || 'User',
+        avatarUrl: conversation.otherUser.avatarUrl || conversation.avatarUrl,
+      }
+    );
+    if (callId) {
+      router.push(`/call/${callId}` as any);
+    }
+  };
 
   // ── Keyboard listeners ────────────────────────────────────────────────────
   useEffect(() => {
@@ -923,6 +943,26 @@ export default function ChatScreen() {
             {renderSubtitle()}
           </View>
         </TouchableOpacity>
+
+        {conversation?.type === 'DIRECT' && (
+          <>
+            <TouchableOpacity
+              style={styles.headerAction}
+              onPress={() => handleStartCall('AUDIO')}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="call-outline" size={21} color={C.primary} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.headerAction}
+              onPress={() => handleStartCall('VIDEO')}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="videocam-outline" size={22} color={C.primary} />
+            </TouchableOpacity>
+          </>
+        )}
 
         <TouchableOpacity style={styles.headerAction} onPress={() => setShowHeaderMenu(true)}>
           <Ionicons name="ellipsis-vertical" size={20} color={C.textSecondary} />
