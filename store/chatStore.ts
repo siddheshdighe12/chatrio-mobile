@@ -4,6 +4,10 @@ import { getSocket } from '../lib/socket';
 
 interface ChatState {
   conversations: Conversation[];
+  /** true while the initial /conversations fetch is in-flight */
+  conversationsLoading: boolean;
+  /** non-null when the last /conversations fetch failed */
+  conversationsError: string | null;
   activeConversationId: string | null;
   messages: Record<string, Message[]>;
   typingUsers: Record<string, Record<string, string>>; // conversationId -> { [userId]: displayName }
@@ -14,6 +18,8 @@ interface ChatState {
   // Actions
   setActiveConversationId: (id: string | null) => void;
   setConversations: (conversations: Conversation[]) => void;
+  setConversationsLoading: (loading: boolean) => void;
+  setConversationsError: (error: string | null) => void;
   addOrUpdateConversation: (conversation: Conversation) => void;
   setMessages: (conversationId: string, messages: Message[]) => void;
   addMessage: (conversationId: string, message: Message) => void;
@@ -32,6 +38,8 @@ interface ChatState {
 
 export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
+  conversationsLoading: false,
+  conversationsError: null,
   activeConversationId: null,
   messages: {},
   typingUsers: {},
@@ -40,6 +48,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   editingMessage: null,
 
   setActiveConversationId: (id) => set({ activeConversationId: id }),
+
+  setConversationsLoading: (loading) => set({ conversationsLoading: loading }),
+
+  setConversationsError: (error) => set({ conversationsError: error }),
 
   setConversations: (conversations) =>
     set((state) => {

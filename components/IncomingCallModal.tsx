@@ -18,7 +18,16 @@ const { width } = Dimensions.get('window');
 export function IncomingCallModal() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { stage, otherUser, callType, callId, acceptCall, declineCall } = useCallStore();
+  const {
+    stage,
+    otherUser,
+    callType,
+    callId,
+    isGroupCall,
+    groupName,
+    acceptCall,
+    declineCall,
+  } = useCallStore();
 
   const isVisible = stage === 'INCOMING_RINGING' || stage === 'CONNECTING';
 
@@ -53,7 +62,7 @@ export function IncomingCallModal() {
               color="#A5B4FC"
             />
             <Text style={styles.badgeText}>
-              Incoming {callType === 'VIDEO' ? 'Video' : 'Audio'} Call
+              {isGroupCall ? 'Group ' : ''}Incoming {callType === 'VIDEO' ? 'Video' : 'Audio'} Call
             </Text>
           </View>
 
@@ -64,14 +73,21 @@ export function IncomingCallModal() {
             ) : (
               <View style={[styles.avatar, styles.placeholderAvatar]}>
                 <Text style={styles.avatarInitial}>
-                  {otherUser.displayName ? otherUser.displayName.charAt(0).toUpperCase() : '?'}
+                  {(isGroupCall ? groupName : otherUser.displayName)?.charAt(0).toUpperCase() || '?'}
                 </Text>
               </View>
             )}
           </View>
 
           {/* Caller Details */}
-          <Text style={styles.callerName}>{otherUser.displayName}</Text>
+          <Text style={styles.callerName}>
+            {isGroupCall ? groupName : otherUser.displayName}
+          </Text>
+          {isGroupCall && otherUser.displayName && (
+            <Text style={styles.initiatorText}>
+              Started by {otherUser.displayName}
+            </Text>
+          )}
           <Text style={styles.statusText}>
             {stage === 'CONNECTING' ? 'Connecting...' : 'Ringing...'}
           </Text>
@@ -176,6 +192,12 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: '700',
     color: '#F8FAFC',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  initiatorText: {
+    fontSize: 15,
+    color: '#CBD5E1',
     marginBottom: 8,
     textAlign: 'center',
   },

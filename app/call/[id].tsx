@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -7,7 +7,7 @@ import {
   Image,
   Dimensions,
   ActivityIndicator,
-  Platform,
+  Alert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -17,10 +17,46 @@ import {
   VideoTrack,
   useTracks,
   useLocalParticipant,
+  useParticipants,
   AudioSession,
 } from '@livekit/react-native';
-import { Track } from 'livekit-client';
+import {
+  Track,
+  VideoPresets,
+  type RoomOptions,
+  type VideoCaptureOptions,
+} from 'livekit-client';
 import { useCallStore } from '../../store/callStore';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Room-level options — passed once to <LiveKitRoom options={...}>
+// adaptiveStream: remote video quality adapts to the render element's size
+// dynacast:       only publish simulcast layers that subscribers need
+// ─────────────────────────────────────────────────────────────────────────────
+const ROOM_OPTIONS: RoomOptions = {
+  adaptiveStream: true,
+  dynacast: true,
+  publishDefaults: {
+    videoEncoding: {
+      // 720p @ 30 fps cap — real bitrate is negotiated adaptively downward
+      maxBitrate: 1_500_000,
+      maxFramerate: 30,
+    },
+    // Two lower simulcast layers so weak-link subscribers still get video
+    videoSimulcastLayers: [VideoPresets.h360, VideoPresets.h540],
+    simulcast: true,
+    dtx: true, // discontinuous audio transmission (saves bandwidth on silence)
+    red: true, // audio redundancy packets
+  },
+};
+
+// Default capture options for the front camera at 720p / 30 fps.
+// This is the primary reason for blurry video: without an explicit resolution
+// the SDK falls back to the WebRTC default, which is typically 640×480 or lower.
+const DEFAULT_VIDEO_CAPTURE: VideoCaptureOptions = {
+  facingMode: 'user',
+  resolution: { width: 1280, height: 720, frameRate: 30 },
+};
 
 const { width, height } = Dimensions.get('window');
 
@@ -38,6 +74,8 @@ function ActiveCallSession({ onEndCall }: { onEndCall: () => void }) {
   const {
     callType,
     otherUser,
+    isGroupCall,
+    groupName,
     isMuted,
     isCameraEnabled,
     isSpeakerOn,
@@ -47,113 +85,242 @@ function ActiveCallSession({ onEndCall }: { onEndCall: () => void }) {
   } = useCallStore();
 
   const { localParticipant } = useLocalParticipant();
+  const participants = useParticipants();
+
+  // Track which lens is currently active so flip and re-enable stay consistent
+  const facingModeRef = useRef<'user' | 'environment'>('user');
 
   // Query camera tracks for video rendering
   const tracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
 
   // Separate local and remote video tracks
   const localTrackRef = tracks.find(
-    (t) => t.participant.identity === localParticipant.identity
+    (t) => t.participant.identity === localParticipant?.identity,
   );
   const remoteTrackRef = tracks.find(
-    (t) => t.participant.identity !== localParticipant.identity
+    (t) => t.participant.identity !== localParticipant?.identity,
   );
 
-  // Sync mute state to LiveKit local audio
+  // Sync mute state → LiveKit microphone
   useEffect(() => {
-    if (localParticipant) {
-      localParticipant.setMicrophoneEnabled(!isMuted).catch((err) => {
-        console.warn('Error setting microphone:', err);
-      });
-    }
+    if (!localParticipant) return;
+    localParticipant.setMicrophoneEnabled(!isMuted).catch((err) => {
+      console.warn('[Call] setMicrophoneEnabled error:', err);
+    });
   }, [isMuted, localParticipant]);
 
-  // Sync camera state to LiveKit local video
+  // Sync camera state → LiveKit camera (pass capture options to maintain quality)
   useEffect(() => {
-    if (localParticipant && callType === 'VIDEO') {
-      localParticipant.setCameraEnabled(isCameraEnabled).catch((err) => {
-        console.warn('Error setting camera:', err);
-      });
-    }
+    if (!localParticipant || callType !== 'VIDEO') return;
+    const opts: VideoCaptureOptions = {
+      facingMode: facingModeRef.current,
+      resolution: { width: 1280, height: 720, frameRate: 30 },
+    };
+    localParticipant.setCameraEnabled(isCameraEnabled, opts).catch((err) => {
+      console.warn('[Call] setCameraEnabled error:', err);
+      if (isCameraEnabled) {
+        Alert.alert(
+          'Camera Error',
+          'Could not enable camera. Check permissions in Settings.',
+          [{ text: 'OK' }],
+        );
+      }
+    });
   }, [isCameraEnabled, localParticipant, callType]);
 
-  // Sync speaker output state
+  // Sync audio output
   useEffect(() => {
-    AudioSession.selectAudioOutput(isSpeakerOn ? 'speaker' : 'earpiece').catch((err) => {
-      console.warn('Error setting audio output:', err);
-    });
+    AudioSession.selectAudioOutput(isSpeakerOn ? 'speaker' : 'earpiece').catch(
+      (err) => {
+        console.warn('[Call] selectAudioOutput error:', err);
+      },
+    );
   }, [isSpeakerOn]);
 
-  const handleFlipCamera = () => {
-    const videoTrack = localParticipant.getTrackPublication(Track.Source.Camera)?.videoTrack;
-    if (videoTrack && typeof (videoTrack as any).restart === 'function') {
-      const currentFacing = (videoTrack as any).facingMode;
-      const nextFacing = currentFacing === 'user' ? 'environment' : 'user';
-      (videoTrack as any).restart({ facingMode: nextFacing });
+  // Flip camera: use LiveKit's LocalVideoTrack.restartTrack API with fallback to native _switchCamera
+  const handleFlipCamera = useCallback(async () => {
+    if (!localParticipant || !isCameraEnabled) return;
+    const next: 'user' | 'environment' =
+      facingModeRef.current === 'user' ? 'environment' : 'user';
+    facingModeRef.current = next;
+    const opts: VideoCaptureOptions = {
+      facingMode: next,
+      resolution: { width: 1280, height: 720, frameRate: 30 },
+    };
+
+    try {
+      const pub = localParticipant.getTrackPublication(Track.Source.Camera);
+      const videoTrack = pub?.videoTrack;
+
+      if (videoTrack && typeof (videoTrack as any).restartTrack === 'function') {
+        await (videoTrack as any).restartTrack(opts);
+      } else if (
+        videoTrack &&
+        typeof (videoTrack.mediaStreamTrack as any)?._switchCamera === 'function'
+      ) {
+        (videoTrack.mediaStreamTrack as any)._switchCamera();
+      } else {
+        // Fallback: unpublish previous camera track and re-enable with new facingMode
+        if (pub?.track) {
+          await localParticipant.unpublishTrack(pub.track, true);
+        }
+        await localParticipant.setCameraEnabled(true, opts);
+      }
+    } catch (err) {
+      console.warn('[Call] flip camera error:', err);
     }
-  };
+  }, [localParticipant, isCameraEnabled]);
+
 
   return (
     <View style={styles.fullscreen}>
       {callType === 'VIDEO' ? (
         // ── Video Call Layout ──────────────────────────────────────────
-        <View style={styles.fullscreen}>
-          {remoteTrackRef ? (
-            <VideoTrack
-              trackRef={remoteTrackRef}
-              style={styles.fullscreenVideo}
-              objectFit="cover"
-            />
-          ) : (
-            <View style={styles.waitingRemoteVideo}>
+        isGroupCall ? (
+          // ── Group Video Multi-Participant Grid ───────────────────────
+          <View style={[styles.fullscreen, { paddingTop: insets.top + 60, paddingBottom: insets.bottom + 90 }]}>
+            <View style={styles.groupVideoGrid}>
+              {participants.map((p) => {
+                const isLocal = p.identity === localParticipant?.identity;
+                const pTrack = tracks.find((t) => t.participant.identity === p.identity);
+                const hasVideo = isLocal ? isCameraEnabled && localTrackRef : !!pTrack;
+
+                return (
+                  <View key={p.identity} style={styles.groupVideoTile}>
+                    {hasVideo && (isLocal ? localTrackRef : pTrack) ? (
+                      <VideoTrack
+                        trackRef={(isLocal ? localTrackRef : pTrack)!}
+                        style={styles.gridVideo}
+                        objectFit="cover"
+                        mirror={isLocal && facingModeRef.current === 'user'}
+                        zOrder={0}
+                      />
+                    ) : (
+                      <View style={styles.groupTilePlaceholder}>
+                        <View style={styles.groupTileAvatar}>
+                          <Text style={styles.groupTileAvatarInitial}>
+                            {(p.name || p.identity).charAt(0).toUpperCase()}
+                          </Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Participant Name Badge */}
+                    <View style={styles.groupTileTag}>
+                      <Text style={styles.groupTileName} numberOfLines={1}>
+                        {isLocal ? `${p.name || 'You'} (You)` : (p.name || p.identity)}
+                      </Text>
+                      {p.isSpeaking && (
+                        <Ionicons name="volume-high" size={13} color="#10B981" />
+                      )}
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        ) : (
+          // ── One-on-One Video Call Layout ─────────────────────────────
+          <View style={styles.fullscreen}>
+            {/* Remote video — full-screen background; zOrder=0 (default OpenGL layer) */}
+            {remoteTrackRef ? (
+              <VideoTrack
+                trackRef={remoteTrackRef}
+                style={styles.fullscreenVideo}
+                objectFit="contain"
+                zOrder={0}
+              />
+            ) : (
+              <View style={styles.waitingRemoteVideo}>
+                {otherUser?.avatarUrl ? (
+                  <Image source={{ uri: otherUser.avatarUrl }} style={styles.largeAvatar} />
+                ) : (
+                  <View style={[styles.largeAvatar, styles.placeholderAvatar]}>
+                    <Text style={styles.largeAvatarInitial}>
+                      {otherUser?.displayName?.charAt(0).toUpperCase() || '?'}
+                    </Text>
+                  </View>
+                )}
+                <Text style={styles.waitingVideoText}>
+                  Waiting for {otherUser?.displayName || 'user'} video...
+                </Text>
+              </View>
+            )}
+
+            {/* Local PiP — must be zOrder=1 to render above remote on Android */}
+            {isCameraEnabled && localTrackRef && (
+              <View style={[styles.pipContainer, { top: insets.top + 20 }]}>
+                <VideoTrack
+                  trackRef={localTrackRef}
+                  style={styles.pipVideo}
+                  objectFit="cover"
+                  mirror={facingModeRef.current === 'user'}
+                  zOrder={1}
+                />
+              </View>
+            )}
+          </View>
+        )
+      ) : (
+        // ── Audio Call Layout ──────────────────────────────────────────
+        isGroupCall ? (
+          // ── Group Audio Call Layout ──────────────────────────────────
+          <View style={[styles.audioCenterContainer, { paddingTop: insets.top + 70 }]}>
+            <View style={styles.groupAudioGrid}>
+              {participants.map((p) => {
+                const isLocal = p.identity === localParticipant?.identity;
+                return (
+                  <View key={p.identity} style={styles.groupAudioItem}>
+                    <View style={[styles.groupAudioAvatarWrap, p.isSpeaking && styles.groupAudioAvatarSpeaking]}>
+                      <View style={[styles.groupAudioAvatar, styles.placeholderAvatar]}>
+                        <Text style={styles.groupAudioAvatarText}>
+                          {(p.name || p.identity).charAt(0).toUpperCase()}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.groupAudioName} numberOfLines={1}>
+                      {isLocal ? `${p.name || 'You'} (You)` : (p.name || p.identity)}
+                    </Text>
+                    {p.isSpeaking && (
+                      <View style={styles.speakingBadge}>
+                        <Text style={styles.speakingBadgeText}>Speaking</Text>
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+
+            <View style={[styles.audioStatusBadge, { marginTop: 28 }]}>
+              <View style={styles.liveIndicatorDot} />
+              <Text style={styles.audioStatusText}>
+                Group Audio • {participants.length} Active
+              </Text>
+            </View>
+          </View>
+        ) : (
+          // ── One-on-One Audio Call Layout ─────────────────────────────
+          <View style={styles.audioCenterContainer}>
+            <View style={styles.audioAvatarGlow}>
               {otherUser?.avatarUrl ? (
-                <Image source={{ uri: otherUser.avatarUrl }} style={styles.largeAvatar} />
+                <Image source={{ uri: otherUser.avatarUrl }} style={styles.audioAvatar} />
               ) : (
-                <View style={[styles.largeAvatar, styles.placeholderAvatar]}>
-                  <Text style={styles.largeAvatarInitial}>
+                <View style={[styles.audioAvatar, styles.placeholderAvatar]}>
+                  <Text style={styles.audioAvatarInitial}>
                     {otherUser?.displayName?.charAt(0).toUpperCase() || '?'}
                   </Text>
                 </View>
               )}
-              <Text style={styles.waitingVideoText}>
-                Waiting for {otherUser?.displayName || 'user'} video...
-              </Text>
             </View>
-          )}
-
-          {/* Local Participant PiP */}
-          {isCameraEnabled && localTrackRef && (
-            <View style={[styles.pipContainer, { top: insets.top + 20 }]}>
-              <VideoTrack
-                trackRef={localTrackRef}
-                style={styles.pipVideo}
-                objectFit="cover"
-                mirror={true}
-              />
+            <Text style={styles.otherUserName}>{otherUser?.displayName}</Text>
+            <View style={styles.audioStatusBadge}>
+              <View style={styles.liveIndicatorDot} />
+              <Text style={styles.audioStatusText}>Audio Call Active</Text>
             </View>
-          )}
-        </View>
-      ) : (
-        // ── Audio Call Layout ──────────────────────────────────────────
-        <View style={styles.audioCenterContainer}>
-          <View style={styles.audioAvatarGlow}>
-            {otherUser?.avatarUrl ? (
-              <Image source={{ uri: otherUser.avatarUrl }} style={styles.audioAvatar} />
-            ) : (
-              <View style={[styles.audioAvatar, styles.placeholderAvatar]}>
-                <Text style={styles.audioAvatarInitial}>
-                  {otherUser?.displayName?.charAt(0).toUpperCase() || '?'}
-                </Text>
-              </View>
-            )}
           </View>
-          <Text style={styles.otherUserName}>{otherUser?.displayName}</Text>
-          <View style={styles.audioStatusBadge}>
-            <View style={styles.liveIndicatorDot} />
-            <Text style={styles.audioStatusText}>Audio Call Active</Text>
-          </View>
-        </View>
+        )
       )}
+
 
       {/* Floating Control Bar */}
       <View style={[styles.controlsBar, { paddingBottom: insets.bottom + 20 }]}>
@@ -239,6 +406,8 @@ export default function CallScreen() {
     serverUrl,
     duration,
     endReason,
+    isGroupCall,
+    groupName,
     cancelCall,
     endCall,
     setDuration,
@@ -288,7 +457,9 @@ export default function CallScreen() {
       {/* Top Floating Header */}
       <View style={[styles.topHeader, { paddingTop: insets.top + 12 }]}>
         <View style={styles.headerInfo}>
-          <Text style={styles.headerTitle}>{otherUser?.displayName || 'Call'}</Text>
+          <Text style={styles.headerTitle}>
+            {isGroupCall ? (groupName || 'Group Call') : (otherUser?.displayName || 'Call')}
+          </Text>
           <Text style={styles.headerSubtitle}>
             {stage === 'OUTGOING_RINGING'
               ? 'Ringing...'
@@ -297,7 +468,7 @@ export default function CallScreen() {
               : stage === 'CONNECTING'
               ? 'Connecting...'
               : stage === 'ACTIVE'
-              ? formatDuration(duration)
+              ? (isGroupCall ? `Active • ${formatDuration(duration)}` : formatDuration(duration))
               : endReason || 'Call Ended'}
           </Text>
         </View>
@@ -313,12 +484,14 @@ export default function CallScreen() {
             ) : (
               <View style={[styles.ringingAvatar, styles.placeholderAvatar]}>
                 <Text style={styles.ringingAvatarInitial}>
-                  {otherUser?.displayName?.charAt(0).toUpperCase() || '?'}
+                  {(isGroupCall ? groupName : otherUser?.displayName)?.charAt(0).toUpperCase() || '?'}
                 </Text>
               </View>
             )}
           </View>
-          <Text style={styles.ringingName}>{otherUser?.displayName}</Text>
+          <Text style={styles.ringingName}>
+            {isGroupCall ? (groupName || 'Group Call') : otherUser?.displayName}
+          </Text>
           <Text style={styles.ringingStatus}>
             {stage === 'CONNECTING' ? 'Connecting to media server...' : 'Calling...'}
           </Text>
@@ -339,11 +512,20 @@ export default function CallScreen() {
           token={token}
           connect={true}
           audio={true}
-          video={callType === 'VIDEO'}
+          video={callType === 'VIDEO' ? DEFAULT_VIDEO_CAPTURE : false}
+          options={ROOM_OPTIONS}
           onConnected={() => setConnected(true)}
           onDisconnected={handleEnd}
           onError={(err) => {
-            console.error('LiveKit Room error:', err);
+            console.error('[Call] LiveKit Room error:', err);
+          }}
+          onMediaDeviceFailure={(failure) => {
+            console.warn('[Call] Media device failure:', failure);
+            Alert.alert(
+              'Media Error',
+              'A camera or microphone error occurred. Check app permissions in Settings.',
+              [{ text: 'OK' }],
+            );
           }}
         >
           <ActiveCallSession onEndCall={handleEnd} />
@@ -639,5 +821,121 @@ const styles = StyleSheet.create({
   endedDuration: {
     color: '#94A3B8',
     fontSize: 15,
+  },
+  // ── Group Video & Audio Styles ─────────────────────────────────────────────
+  groupVideoGrid: {
+    flex: 1,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    padding: 6,
+    gap: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  groupVideoTile: {
+    width: (width - 28) / 2,
+    height: (height - 240) / 2,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#1E1E2D',
+    position: 'relative',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  gridVideo: {
+    width: '100%',
+    height: '100%',
+  },
+  groupTilePlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#181824',
+  },
+  groupTileAvatar: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#3730A3',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  groupTileAvatarInitial: {
+    color: '#FFFFFF',
+    fontSize: 26,
+    fontWeight: '700',
+  },
+  groupTileTag: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    right: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  groupTileName: {
+    color: '#F8FAFC',
+    fontSize: 12,
+    fontWeight: '600',
+    flex: 1,
+  },
+  groupAudioGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 20,
+    paddingHorizontal: 20,
+  },
+  groupAudioItem: {
+    alignItems: 'center',
+    width: (width - 100) / 3,
+    marginBottom: 16,
+  },
+  groupAudioAvatarWrap: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    padding: 3,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'transparent',
+  },
+  groupAudioAvatarSpeaking: {
+    backgroundColor: '#10B981',
+  },
+  groupAudioAvatar: {
+    width: 74,
+    height: 74,
+    borderRadius: 37,
+  },
+  groupAudioAvatarText: {
+    color: '#FFFFFF',
+    fontSize: 28,
+    fontWeight: '700',
+  },
+  groupAudioName: {
+    color: '#F8FAFC',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 6,
+    textAlign: 'center',
+  },
+  speakingBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginTop: 2,
+  },
+  speakingBadgeText: {
+    color: '#10B981',
+    fontSize: 10,
+    fontWeight: '600',
   },
 });

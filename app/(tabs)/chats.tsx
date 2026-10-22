@@ -220,8 +220,18 @@ export default function ChatsScreen() {
   const C = useThemeColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { user } = useAuthStore();
-  const { conversations, setConversations, addOrUpdateConversation, typingUsers, presence } = useChatStore();
+  const { user, isLoading: authIsLoading, isAuthenticated } = useAuthStore();
+  const {
+    conversations,
+    conversationsLoading,
+    conversationsError,
+    setConversations,
+    setConversationsLoading,
+    setConversationsError,
+    addOrUpdateConversation,
+    typingUsers,
+    presence,
+  } = useChatStore();
 
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -229,20 +239,68 @@ export default function ChatsScreen() {
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [selectedConv, setSelectedConv] = useState<Conversation | null>(null);
 
-  const fetchConversations = useCallback(async () => {
-    try {
-      const response = await api.get('/conversations');
-      setConversations(response.data);
-    } catch (err: any) {
-      console.warn('Failed to fetch conversations:', err?.message);
-    }
-  }, [setConversations]);
+  // Track whether we've done at least one successful load so we know
+  // whether the empty state means "truly empty" vs "not yet loaded".
+  const hasLoadedOnceRef = useRef(false);
+  // Prevent concurrent in-flight requests.
+  const fetchInFlightRef = useRef(false);
 
-  useEffect(() => { fetchConversations(); }, [fetchConversations]);
+  const fetchConversations = useCallback(
+    async (opts?: { isRefresh?: boolean; signal?: AbortSignal }) => {
+      const { isRefresh = false, signal } = opts ?? {};
+
+      // Don't start a new request if one is already running (unless it's a
+      // pull-to-refresh, which is always intentional).
+      if (!isRefresh && fetchInFlightRef.current) return;
+
+      fetchInFlightRef.current = true;
+      if (!isRefresh) {
+        setConversationsLoading(true);
+        setConversationsError(null);
+      }
+
+      try {
+        const response = await api.get('/conversations', { signal });
+        if (signal?.aborted) return;
+        setConversations(response.data);
+        setConversationsError(null);
+        hasLoadedOnceRef.current = true;
+      } catch (err: any) {
+        // Ignore cancellation — it's intentional (e.g., component unmounted).
+        if (err?.code === 'ERR_CANCELED' || signal?.aborted) return;
+        console.warn('Failed to fetch conversations:', err?.message);
+        setConversationsError(
+          err?.response?.status === 401
+            ? 'Session expired. Please restart the app.'
+            : 'Could not load conversations. Check your connection.',
+        );
+      } finally {
+        if (!signal?.aborted) {
+          setConversationsLoading(false);
+          fetchInFlightRef.current = false;
+        }
+      }
+    },
+    [setConversations, setConversationsLoading, setConversationsError],
+  );
+
+  // Fetch only after authentication is fully resolved, and only once per mount.
+  useEffect(() => {
+    // Wait until the auth loading phase is done.
+    if (authIsLoading || !isAuthenticated) return;
+
+    const controller = new AbortController();
+    fetchConversations({ signal: controller.signal });
+
+    return () => {
+      controller.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authIsLoading, isAuthenticated]);
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await fetchConversations();
+    await fetchConversations({ isRefresh: true });
     setRefreshing(false);
   };
 
@@ -516,8 +574,73 @@ export default function ChatsScreen() {
         </View>
       </View>
 
-      {/* Conversations */}
-      {filteredConversations.length === 0 ? (
+      {/* Conversations — loading / error / empty / list */}
+      {conversationsLoading && !refreshing ? (
+        // Initial load: show polished skeleton rows
+        <View style={{ flex: 1, paddingTop: 4 }}>
+          {Array.from({ length: 7 }).map((_, i) => (
+            <View
+              key={i}
+              style={[
+                styles.row,
+                { opacity: 1 - i * 0.1 },
+              ]}
+            >
+              {/* Avatar skeleton */}
+              <View
+                style={{
+                  width: 54,
+                  height: 54,
+                  borderRadius: 27,
+                  backgroundColor: C.surfaceSecondary ?? C.inputBackground,
+                  marginRight: 14,
+                }}
+              />
+              <View style={{ flex: 1 }}>
+                {/* Name skeleton */}
+                <View
+                  style={{
+                    height: 14,
+                    width: `${60 + (i % 3) * 12}%`,
+                    borderRadius: 7,
+                    backgroundColor: C.surfaceSecondary ?? C.inputBackground,
+                    marginBottom: 8,
+                  }}
+                />
+                {/* Snippet skeleton */}
+                <View
+                  style={{
+                    height: 12,
+                    width: `${40 + (i % 4) * 10}%`,
+                    borderRadius: 6,
+                    backgroundColor: C.surfaceSecondary ?? C.inputBackground,
+                  }}
+                />
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : conversationsError ? (
+        // Error state with retry
+        <View style={styles.empty}>
+          <View style={[styles.emptyIconCircle, { backgroundColor: C.surfaceSecondary ?? C.inputBackground }]}>
+            <Ionicons name="cloud-offline-outline" size={40} color={C.error ?? '#EF4444'} />
+          </View>
+          <Text style={[styles.emptyTitle, { color: C.textPrimary }]}>Failed to load chats</Text>
+          <Text style={[styles.emptySubtitle, { color: C.textSecondary }]}>
+            {conversationsError}
+          </Text>
+          <TouchableOpacity
+            style={[styles.emptyBtn, { backgroundColor: C.primary }]}
+            onPress={() => fetchConversations({ isRefresh: true })}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="refresh-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
+            <Text style={{ color: '#fff', fontWeight: '700', fontSize: FontSize.base }}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      ) : filteredConversations.length === 0 && hasLoadedOnceRef.current ? (
+        // True empty state — only shown after a successful load confirms zero conversations
         <View style={styles.empty}>
           <View style={[styles.emptyIconCircle, { backgroundColor: C.surfaceSecondary ?? C.inputBackground }]}>
             <Ionicons name="chatbubbles-outline" size={40} color={C.primary} />
@@ -540,7 +663,7 @@ export default function ChatsScreen() {
             </TouchableOpacity>
           )}
         </View>
-      ) : (
+      ) : filteredConversations.length > 0 ? (
         <FlatList
           data={filteredConversations}
           keyExtractor={(item) => item.id}
@@ -551,7 +674,7 @@ export default function ChatsScreen() {
           )}
           contentContainerStyle={{ paddingBottom: Spacing.xl }}
         />
-      )}
+      ) : null}
 
       {/* Long-Press Action Sheet */}
       <ActionSheet

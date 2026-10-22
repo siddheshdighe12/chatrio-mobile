@@ -42,14 +42,18 @@ export function connectSocket(): Socket {
     transports: ['websocket', 'polling'],
     reconnection: true,
     reconnectionAttempts: 10,
+    // Start reconnecting after 1 s; back off up to 5 s so we don't hammer
+    // the server on a flaky connection, but still recover reasonably quickly.
     reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
   });
 
   socket.on('connect', () => {
     console.log('⚡ Socket.IO connected with id:', socket?.id);
   });
 
-  // Fire all registered callbacks on every successful reconnect
+  // 'reconnect' fires on the socket object in Socket.IO v4 each time the
+  // underlying manager successfully re-establishes the connection.
   socket.on('reconnect', (attempt: number) => {
     console.log(`⚡ Socket.IO reconnected after ${attempt} attempt(s)`);
     for (const cb of reconnectCallbacks) {

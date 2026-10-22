@@ -23,6 +23,7 @@ import * as Haptics from 'expo-haptics';
 import { useThemeColors } from '../../hooks/useThemeColors';
 import { FontSize, Spacing, Radius } from '../../constants/Typography';
 import { api } from '../../lib/api';
+import { getSocket } from '../../lib/socket';
 import { useChatStore } from '../../store/chatStore';
 import { useAuthStore } from '../../store/authStore';
 import { Conversation, UserSummary } from '../../types/chat';
@@ -68,6 +69,7 @@ export default function GroupInfoScreen() {
   // Member action sheet state
   const [selectedMember, setSelectedMember] = useState<MemberItem | null>(null);
   const [previewAvatar, setPreviewAvatar] = useState<string | null>(null);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
 
   const fetchGroupDetails = useCallback(async () => {
     if (!id) return;
@@ -88,6 +90,41 @@ export default function GroupInfoScreen() {
   useEffect(() => {
     fetchGroupDetails();
   }, [fetchGroupDetails]);
+
+  // Real-time synchronization
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket || !id) return;
+
+    socket.emit('conversation:join', id);
+
+    const onConversationUpdated = (updatedConv: Conversation) => {
+      if (updatedConv.id === id) {
+        setConversation((prev) => (prev ? { ...prev, ...updatedConv } : updatedConv));
+        addOrUpdateConversation(updatedConv);
+      }
+    };
+
+    const onMembersUpdated = (payload: { conversationId: string; event: string; userId?: string }) => {
+      if (payload.conversationId === id) {
+        if (payload.event === 'MEMBER_REMOVED' && payload.userId === user?.id) {
+          Alert.alert('Notice', 'You have been removed from this group.');
+          removeConversation(id);
+          router.replace('/(tabs)/groups' as any);
+        } else {
+          fetchGroupDetails();
+        }
+      }
+    };
+
+    socket.on('conversation:updated', onConversationUpdated);
+    socket.on('conversation:members_updated', onMembersUpdated);
+
+    return () => {
+      socket.off('conversation:updated', onConversationUpdated);
+      socket.off('conversation:members_updated', onMembersUpdated);
+    };
+  }, [id, fetchGroupDetails, user?.id, addOrUpdateConversation, removeConversation, router]);
 
   // Check current user role
   const myMembership = members.find((m) => m.userId === user?.id);
@@ -120,15 +157,18 @@ export default function GroupInfoScreen() {
     const formData = new FormData();
     formData.append('file', { uri, name: filename, type: mimeType } as any);
 
+    setIsUploadingAvatar(true);
     try {
-      const uploadRes = await api.post('/users/avatar', formData);
-      const newAvatarUrl = uploadRes.data.avatarUrl;
+      const uploadRes = await api.post('/upload', formData);
+      const newAvatarUrl = uploadRes.data.url;
       const updateRes = await api.patch(`/conversations/${id}`, { avatarUrl: newAvatarUrl });
       setConversation(updateRes.data);
       addOrUpdateConversation(updateRes.data);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (err: any) {
       Alert.alert('Upload Failed', err.response?.data?.error || err.message || 'Could not upload photo');
+    } finally {
+      setIsUploadingAvatar(false);
     }
   };
 
@@ -352,8 +392,13 @@ export default function GroupInfoScreen() {
                 <TouchableOpacity
                   style={[styles.cameraBadge, { backgroundColor: C.primary }]}
                   onPress={handlePickAvatar}
+                  disabled={isUploadingAvatar}
                 >
-                  <Ionicons name="camera" size={16} color="#fff" />
+                  {isUploadingAvatar ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Ionicons name="camera" size={16} color="#fff" />
+                  )}
                 </TouchableOpacity>
               )}
             </TouchableOpacity>
@@ -466,8 +511,8 @@ export default function GroupInfoScreen() {
                       </View>
                     )}
 
-                    {/* Show action options if admin and not targetting the owner or self */}
-                    {isAdmin && !isItemMe && item.role !== 'OWNER' && (
+                    {/* Show action options: owner can manage admins and members; admin can manage members only */}
+                    {((isOwner && !isItemMe) || (isAdmin && !isItemMe && item.role === 'MEMBER')) && (
                       <TouchableOpacity
                         style={styles.moreBtn}
                         onPress={() => setSelectedMember(item)}
@@ -488,7 +533,7 @@ export default function GroupInfoScreen() {
               <Text style={[styles.dangerText, { color: C.error }]}>Leave Group</Text>
             </TouchableOpacity>
 
-            {isAdmin && (
+            {isOwner && (
               <TouchableOpacity
                 style={[styles.dangerRow, { borderTopColor: C.border, borderTopWidth: 1 }]}
                 onPress={handleDeleteGroup}

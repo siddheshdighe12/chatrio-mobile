@@ -43,3 +43,47 @@ export interface IncomingCallPayload {
   conversationId: string;
   caller: CallParticipant;
 }
+
+// ── Group Calls ──────────────────────────────────────────────────────────────
+
+export interface GroupCallParticipant {
+  id: string;
+  groupCallId: string;
+  userId: string;
+  joinedAt: string;
+  leftAt?: string | null;
+  isActive: boolean;
+  user: CallParticipant;
+}
+
+export interface GroupCall {
+  id: string;
+  conversationId: string;
+  initiatorId: string;
+  callType: CallType;
+  status: 'ACTIVE' | 'ENDED';
+  livekitRoom: string;
+  startedAt: string;
+  endedAt?: string | null;
+  initiator?: CallParticipant;
+  participants: GroupCallParticipant[];
+}
+
+export interface GroupCallResponse {
+  groupCallId: string;
+  livekitRoom: string;
+  token: string;
+  serverUrl: string;
+  callType: CallType;
+  conversationId: string;
+  isExisting?: boolean;
+}
+
+export interface IncomingGroupCallPayload {
+  groupCallId: string;
+  conversationId: string;
+  callType: CallType;
+  initiator: CallParticipant;
+  groupName?: string;
+  activeParticipants?: CallParticipant[];
+}

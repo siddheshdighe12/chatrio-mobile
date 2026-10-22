@@ -82,7 +82,7 @@ export default function RootLayout() {
   } = useAuthStore();
 
   const { loadStoredTheme, mode } = useThemeStore();
-  const { bindSocketEvents, setConversations } = useChatStore();
+  const { bindSocketEvents, setConversations, setConversationsError } = useChatStore();
 
   const resolvedScheme =
     mode === 'system' ? systemColorScheme ?? 'light' : mode;
@@ -294,7 +294,11 @@ export default function RootLayout() {
       console.log('[AppState] Refreshing conversations after resume...');
       api
         .get('/conversations')
-        .then((res) => setConversations(res.data))
+        .then((res) => {
+          setConversations(res.data);
+          // A successful background refresh should also clear any prior error.
+          setConversationsError(null);
+        })
         .catch((err) => console.warn('[AppState] Failed to refresh conversations:', err?.message));
 
       // Re-bind socket event listeners in case the socket was recreated
@@ -326,7 +330,7 @@ export default function RootLayout() {
       subscription.remove();
       unsubReconnect();
     };
-  }, [isAuthenticated, bindSocketEvents, setConversations]);
+  }, [isAuthenticated, bindSocketEvents, setConversations, setConversationsError]);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -370,6 +374,13 @@ export default function RootLayout() {
               name="group/create"
               options={{
                 presentation: 'modal',
+              }}
+            />
+
+            <Stack.Screen
+              name="group/[id]"
+              options={{
+                presentation: 'card',
               }}
             />
 

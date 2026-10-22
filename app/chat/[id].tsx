@@ -26,6 +26,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library';
 import * as Linking from 'expo-linking';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
@@ -46,7 +47,10 @@ import {
 } from '../../lib/socket';
 import { resolveMediaUrl } from '../../lib/media';
 import { Message, Conversation, MessageReaction } from '../../types/chat';
+import { GroupCall } from '../../types/call';
+import { callService } from '../../services/call.service';
 import { Avatar } from '../../components/Avatar';
+import { LinkifiedText } from '../../components/LinkifiedText';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
@@ -192,6 +196,9 @@ export default function ChatScreen() {
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  const [lightboxLoading, setLightboxLoading] = useState(false);
+  const [isSavingImage, setIsSavingImage] = useState(false);
+  const [failedImageUrls, setFailedImageUrls] = useState<Record<string, boolean>>({});
   const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
   const [pendingImage, setPendingImage] = useState<ImagePicker.ImagePickerAsset | null>(null);
   const [pendingFile, setPendingFile] = useState<{ uri: string; name: string; mimeType: string; size: number } | null>(null);
@@ -249,6 +256,75 @@ export default function ChatScreen() {
     );
     if (callId) {
       router.push(`/call/${callId}` as any);
+    }
+  };
+
+  // ── Active Group Call tracking ──────────────────────────────────────────────
+  const [activeGroupCall, setActiveGroupCall] = useState<GroupCall | null>(null);
+
+  const refreshActiveGroupCall = useCallback(async () => {
+    if (conversation?.type !== 'GROUP') return;
+    try {
+      const res = await callService.getActiveGroupCall(conversationId);
+      setActiveGroupCall(res.activeCall);
+    } catch {
+      setActiveGroupCall(null);
+    }
+  }, [conversationId, conversation?.type]);
+
+  useEffect(() => {
+    if (conversation?.type === 'GROUP') {
+      refreshActiveGroupCall();
+    }
+  }, [conversation?.type, refreshActiveGroupCall]);
+
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket || conversation?.type !== 'GROUP') return;
+
+    const onGroupCallStarted = (data: any) => {
+      if (data.conversationId === conversationId) {
+        refreshActiveGroupCall();
+      }
+    };
+
+    const onGroupCallEnded = (data: any) => {
+      if (data.conversationId === conversationId || data.groupCallId === activeGroupCall?.id) {
+        setActiveGroupCall(null);
+      }
+    };
+
+    const onParticipantChange = (data: any) => {
+      if (data.conversationId === conversationId) {
+        refreshActiveGroupCall();
+      }
+    };
+
+    socket.on('group-call:started', onGroupCallStarted);
+    socket.on('group-call:ended', onGroupCallEnded);
+    socket.on('group-call:participant-joined', onParticipantChange);
+    socket.on('group-call:participant-left', onParticipantChange);
+
+    return () => {
+      socket.off('group-call:started', onGroupCallStarted);
+      socket.off('group-call:ended', onGroupCallEnded);
+      socket.off('group-call:participant-joined', onParticipantChange);
+      socket.off('group-call:participant-left', onParticipantChange);
+    };
+  }, [conversationId, conversation?.type, activeGroupCall?.id, refreshActiveGroupCall]);
+
+  const handleStartGroupCall = async (type: 'AUDIO' | 'VIDEO') => {
+    try {
+      const groupCallId = await useCallStore.getState().initiateGroupCall(
+        conversationId,
+        type,
+        conversation?.name || 'Group Call'
+      );
+      if (groupCallId) {
+        router.push(`/call/${groupCallId}` as any);
+      }
+    } catch (err: any) {
+      Alert.alert('Group Call Error', err.message || 'Could not start group call');
     }
   };
 
@@ -580,17 +656,43 @@ export default function ChatScreen() {
     }
   };
 
-  // ── Download / save received image ────────────────────────────────────────
+  // ── Download / save received image to Gallery ─────────────────────────────
   const handleSaveImage = async (url: string) => {
+    if (isSavingImage) return;
+    setIsSavingImage(true);
     const imageUrl = resolveMediaUrl(url);
     try {
-      const filename = imageUrl.split('/').pop() || 'image.jpg';
-      const dir = FileSystem.documentDirectory ?? FileSystem.cacheDirectory;
-      const dest = dir ? `${dir}${dir.endsWith('/') ? '' : '/'}${filename}` : filename;
-      await FileSystem.downloadAsync(imageUrl, dest);
-      Alert.alert('Saved', 'Image saved to your device storage.');
+      const perm = await MediaLibrary.requestPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission Required', 'Chatrio needs permission to save images to your device gallery.');
+        return;
+      }
+      const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+      if (!baseDir) {
+        throw new Error('Temporary storage is unavailable.');
+      }
+      const dirWithSlash = baseDir.endsWith('/') ? baseDir : `${baseDir}/`;
+      const urlWithoutQuery = imageUrl.split('?')[0].split('#')[0];
+      const match = /\.(jpe?g|png|webp|gif)$/i.exec(urlWithoutQuery);
+      const ext = match ? match[1].toLowerCase() : 'jpg';
+      const filename = `chatrio_${Date.now()}.${ext}`;
+      const tempDest = `${dirWithSlash}${filename}`;
+
+      const downloadRes = await FileSystem.downloadAsync(imageUrl, tempDest);
+      if (downloadRes.status < 200 || downloadRes.status >= 300) {
+        throw new Error(`Download failed with status ${downloadRes.status}`);
+      }
+
+      await MediaLibrary.saveToLibraryAsync(downloadRes.uri);
+      FileSystem.deleteAsync(downloadRes.uri, { idempotent: true }).catch(() => {});
+
+      try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+      Alert.alert('Saved to Gallery', 'Image has been saved to your photo gallery.');
     } catch (err: any) {
-      Alert.alert('Save Failed', err?.message || 'Could not save image.');
+      console.warn('Failed to save image:', err);
+      Alert.alert('Save Failed', err?.message || 'Could not save image to gallery.');
+    } finally {
+      setIsSavingImage(false);
     }
   };
 
@@ -822,18 +924,59 @@ export default function ChatScreen() {
 
             {/* Image */}
             {item.type === 'IMAGE' && item.attachments?.[0] && (() => {
-              const resolvedImgUrl = resolveMediaUrl(item.attachments[0].url);
-              // ── Diagnostic (safe — no tokens/secrets) ──────────────────────
-              console.log('[IMAGE RENDER]', { rawUrl: item.attachments[0].url, resolvedUrl: resolvedImgUrl });
-              // ───────────────────────────────────────────────────────────────
+              const attachment = item.attachments[0];
+              const resolvedImgUrl = resolveMediaUrl(attachment.url);
+              const isFailed = failedImageUrls[resolvedImgUrl];
+
+              // Calculate bounded aspect ratio if dimensions are provided
+              const rawWidth = attachment.width || 240;
+              const rawHeight = attachment.height || 180;
+              const maxDisplayWidth = Math.min(SCREEN_WIDTH * 0.65, 260);
+              const maxDisplayHeight = 320;
+              let imgWidth = maxDisplayWidth;
+              let imgHeight = (rawHeight / rawWidth) * imgWidth;
+              if (imgHeight > maxDisplayHeight) {
+                imgHeight = maxDisplayHeight;
+                imgWidth = (rawWidth / rawHeight) * imgHeight;
+              }
+              if (imgHeight < 120) imgHeight = 120;
+              if (imgWidth < 160) imgWidth = 160;
+
+              if (isFailed) {
+                return (
+                  <TouchableOpacity
+                    style={[styles.imageErrorBox, { width: imgWidth, height: imgHeight, backgroundColor: isMine ? 'rgba(0,0,0,0.12)' : C.inputBackground }]}
+                    onPress={() => setFailedImageUrls(prev => ({ ...prev, [resolvedImgUrl]: false }))}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons name="image-outline" size={32} color={bubbleTextColor + '88'} />
+                    <Text style={{ color: bubbleTextColor, fontSize: FontSize.xs, marginTop: 6, fontWeight: '600' }}>Failed to load image</Text>
+                    <Text style={{ color: isMine ? '#BAE6FD' : C.primary, fontSize: FontSize.xs, marginTop: 4 }}>Tap to retry</Text>
+                  </TouchableOpacity>
+                );
+              }
+
               return (
-                <TouchableOpacity onPress={() => setPreviewImageUrl(resolvedImgUrl)} activeOpacity={0.9}>
+                <TouchableOpacity
+                  onPress={() => {
+                    setLightboxLoading(true);
+                    setPreviewImageUrl(resolvedImgUrl);
+                  }}
+                  activeOpacity={0.9}
+                >
                   <Image
                     source={{ uri: resolvedImgUrl }}
-                    style={styles.messageImage}
+                    style={[styles.messageImage, { width: imgWidth, height: imgHeight }]}
                     contentFit="cover"
-                    transition={200}
-                    onError={(e) => console.log('[IMAGE LOAD ERROR]', { url: resolvedImgUrl, error: (e as any)?.error ?? e })}
+                    transition={150}
+                    cachePolicy="memory-disk"
+                    priority="high"
+                    recyclingKey={resolvedImgUrl}
+                    placeholder={{ blurhash: 'L6PZfSi_.AyE_3t7t7R**0o#DgR4' }}
+                    onError={(e) => {
+                      console.log('[IMAGE LOAD ERROR]', { url: resolvedImgUrl, error: (e as any)?.error ?? e });
+                      setFailedImageUrls(prev => ({ ...prev, [resolvedImgUrl]: true }));
+                    }}
                   />
                 </TouchableOpacity>
               );
@@ -860,11 +1003,22 @@ export default function ChatScreen() {
               </TouchableOpacity>
             )}
 
-            {/* Text */}
+            {/* Text — rendered with clickable links */}
             {item.content && (
-              <Text style={[styles.messageText, { color: isDeleted ? (isMine ? C.primaryText + 'aa' : C.textTertiary) : bubbleTextColor, fontStyle: isDeleted ? 'italic' : 'normal' }]}>
-                {item.content}
-              </Text>
+              isDeleted ? (
+                <Text style={[styles.messageText, { color: isMine ? C.primaryText + 'aa' : C.textTertiary, fontStyle: 'italic' }]}>
+                  {item.content}
+                </Text>
+              ) : (
+                <LinkifiedText
+                  text={item.content}
+                  style={[styles.messageText, { color: bubbleTextColor }]}
+                  linkStyle={{
+                    color: isMine ? '#BAE6FD' : C.primary,
+                    textDecorationLine: 'underline',
+                  }}
+                />
+              )
             )}
 
             {/* Meta */}
@@ -964,10 +1118,63 @@ export default function ChatScreen() {
           </>
         )}
 
+        {conversation?.type === 'GROUP' && (
+          <>
+            <TouchableOpacity
+              style={styles.headerAction}
+              onPress={() => handleStartGroupCall('AUDIO')}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="call-outline" size={21} color={C.primary} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.headerAction}
+              onPress={() => handleStartGroupCall('VIDEO')}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="videocam-outline" size={22} color={C.primary} />
+            </TouchableOpacity>
+          </>
+        )}
+
         <TouchableOpacity style={styles.headerAction} onPress={() => setShowHeaderMenu(true)}>
           <Ionicons name="ellipsis-vertical" size={20} color={C.textSecondary} />
         </TouchableOpacity>
       </View>
+
+      {/* ── Active Group Call Banner ──────────────────────────────────────── */}
+      {conversation?.type === 'GROUP' && activeGroupCall && activeGroupCall.status === 'ACTIVE' && (
+        <View style={[styles.activeCallBanner, { backgroundColor: 'rgba(16, 185, 129, 0.12)', borderBottomColor: 'rgba(16, 185, 129, 0.3)' }]}>
+          <View style={styles.activeCallDot} />
+          <View style={{ flex: 1, marginLeft: 10 }}>
+            <Text style={{ color: '#10B981', fontWeight: '700', fontSize: 13 }}>
+              {activeGroupCall.callType === 'VIDEO' ? 'Video' : 'Audio'} Call Active
+            </Text>
+            <Text style={{ color: C.textSecondary, fontSize: 11 }}>
+              {activeGroupCall.participants?.length || 1} participant{((activeGroupCall.participants?.length || 1) !== 1) ? 's' : ''} in room
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.joinCallBtn}
+            onPress={async () => {
+              const ok = await useCallStore.getState().joinGroupCall(
+                activeGroupCall.id,
+                conversationId,
+                activeGroupCall.callType,
+                conversation?.name || 'Group Call'
+              );
+              if (ok) {
+                router.push(`/call/${activeGroupCall.id}` as any);
+              }
+            }}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="call" size={14} color="#FFFFFF" style={{ marginRight: 4 }} />
+            <Text style={styles.joinCallBtnText}>Join</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* ── Header menu modal ───────────────────────────────────────────── */}
       <Modal
@@ -1169,14 +1376,49 @@ export default function ChatScreen() {
       {/* Image Lightbox */}
       <Modal visible={!!previewImageUrl} transparent animationType="fade" onRequestClose={() => setPreviewImageUrl(null)}>
         <View style={styles.lightbox}>
-          <TouchableOpacity style={styles.lightboxClose} onPress={() => setPreviewImageUrl(null)}>
-            <Ionicons name="close" size={28} color="#fff" />
+          {/* Safe-area-aware close button */}
+          <TouchableOpacity
+            style={[styles.lightboxClose, { top: insets.top + 12 }]}
+            onPress={() => setPreviewImageUrl(null)}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Ionicons name="close" size={26} color="#fff" />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.lightboxSave} onPress={() => previewImageUrl && handleSaveImage(previewImageUrl)}>
-            <Ionicons name="download-outline" size={24} color="#fff" />
+
+          {/* Safe-area-aware save to gallery button */}
+          <TouchableOpacity
+            style={[styles.lightboxSave, { bottom: insets.bottom + 20 }]}
+            onPress={() => previewImageUrl && handleSaveImage(previewImageUrl)}
+            disabled={isSavingImage}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            {isSavingImage ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Ionicons name="arrow-down-circle-outline" size={26} color="#fff" />
+            )}
           </TouchableOpacity>
+
+          {/* Image & loading state */}
           {previewImageUrl && (
-            <Image source={{ uri: resolveMediaUrl(previewImageUrl) }} style={styles.lightboxImage} contentFit="contain" />
+            <View style={styles.lightboxImageWrap}>
+              {lightboxLoading && (
+                <View style={StyleSheet.absoluteFillObject} pointerEvents="none">
+                  <View style={styles.lightboxLoader}>
+                    <ActivityIndicator size="large" color="#fff" />
+                  </View>
+                </View>
+              )}
+              <Image
+                source={{ uri: resolveMediaUrl(previewImageUrl) }}
+                style={styles.lightboxImage}
+                contentFit="contain"
+                transition={200}
+                cachePolicy="memory-disk"
+                onLoad={() => setLightboxLoading(false)}
+                onError={() => setLightboxLoading(false)}
+              />
+            </View>
           )}
         </View>
       </Modal>
@@ -1401,28 +1643,46 @@ const styles = StyleSheet.create({
   },
   lightbox: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: 'rgba(0,0,0,0.96)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   lightboxClose: {
     position: 'absolute',
-    top: 50,
     right: 20,
-    zIndex: 10,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderRadius: 20,
+    zIndex: 20,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 22,
     padding: 8,
   },
-  lightboxImage: { width: '100%', height: '80%' },
   lightboxSave: {
     position: 'absolute',
-    bottom: 50,
     right: 20,
-    zIndex: 10,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    zIndex: 20,
+    backgroundColor: 'rgba(255,255,255,0.2)',
     borderRadius: 22,
     padding: 10,
+  },
+  lightboxImageWrap: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  lightboxLoader: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  lightboxImage: {
+    width: '100%',
+    height: '100%',
+  },
+  imageErrorBox: {
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 12,
   },
   // Upload progress bar (absolute, floats above input)
   uploadingBar: {
@@ -1573,5 +1833,36 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '500',
   },
+  // ── Active Group Call Banner ───────────────────────────────────────────────
+  activeCallBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+  },
+  activeCallDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#10B981',
+  },
+  joinCallBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#10B981',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    shadowColor: '#10B981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  joinCallBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
 });
-

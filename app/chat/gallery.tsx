@@ -21,12 +21,16 @@ import {
   Text,
   TouchableOpacity,
   View,
+  Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Linking from 'expo-linking';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library';
+import * as Haptics from 'expo-haptics';
 
 import { api } from '../../lib/api';
 import { resolveMediaUrl } from '../../lib/media';
@@ -204,6 +208,8 @@ function LightboxImageItem({ img }: { img: ImageItem }) {
           style={{ width: SCREEN_W, height: SCREEN_W * 1.2 }}
           contentFit="contain"
           transition={200}
+          cachePolicy="memory-disk"
+          placeholder={{ blurhash: 'L6PZfSi_.AyE_3t7t7R**0o#DgR4' }}
           onError={(e) => {
             console.warn(`[Lightbox] Failed to load image: id=${img.id}, url=${resolvedUrl}:`, e.error);
             setFailed(true);
@@ -220,6 +226,7 @@ function ImageLightbox({ images, initialIndex, onClose }: {
   onClose: () => void;
 }) {
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
+  const [isSaving, setIsSaving] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
   useEffect(() => {
@@ -230,6 +237,45 @@ function ImageLightbox({ images, initialIndex, onClose }: {
 
   const current = images[currentIndex];
 
+  const handleSave = async (url: string) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    const imageUrl = resolveMediaUrl(url);
+    try {
+      const perm = await MediaLibrary.requestPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission Required', 'Chatrio needs permission to save images to your device gallery.');
+        return;
+      }
+      const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+      if (!baseDir) {
+        throw new Error('Temporary storage is unavailable.');
+      }
+      const dirWithSlash = baseDir.endsWith('/') ? baseDir : `${baseDir}/`;
+      const urlWithoutQuery = imageUrl.split('?')[0].split('#')[0];
+      const match = /\.(jpe?g|png|webp|gif)$/i.exec(urlWithoutQuery);
+      const ext = match ? match[1].toLowerCase() : 'jpg';
+      const filename = `chatrio_${Date.now()}.${ext}`;
+      const tempDest = `${dirWithSlash}${filename}`;
+
+      const downloadRes = await FileSystem.downloadAsync(imageUrl, tempDest);
+      if (downloadRes.status < 200 || downloadRes.status >= 300) {
+        throw new Error(`Download failed with status ${downloadRes.status}`);
+      }
+
+      await MediaLibrary.saveToLibraryAsync(downloadRes.uri);
+      FileSystem.deleteAsync(downloadRes.uri, { idempotent: true }).catch(() => {});
+
+      try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+      Alert.alert('Saved to Gallery', 'Image has been saved to your photo gallery.');
+    } catch (err: any) {
+      console.warn('Failed to save image:', err);
+      Alert.alert('Save Failed', err?.message || 'Could not save image to gallery.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   return (
     <Modal visible animationType="fade" transparent onRequestClose={onClose}>
       <View style={lbStyles.bg}>
@@ -238,7 +284,17 @@ function ImageLightbox({ images, initialIndex, onClose }: {
             <Ionicons name="close" size={26} color="#fff" />
           </TouchableOpacity>
           <Text style={lbStyles.counter}>{currentIndex + 1} / {images.length}</Text>
-          <View style={{ width: 44 }} />
+          <TouchableOpacity
+            style={lbStyles.saveBtn}
+            onPress={() => current && handleSave(current.url)}
+            disabled={isSaving}
+          >
+            {isSaving ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Ionicons name="download-outline" size={24} color="#fff" />
+            )}
+          </TouchableOpacity>
         </View>
 
         <ScrollView
@@ -271,6 +327,7 @@ const lbStyles = StyleSheet.create({
   bg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center' },
   topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: Spacing.base, paddingVertical: Spacing.sm, position: 'absolute', top: 44, left: 0, right: 0, zIndex: 10 },
   closeBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  saveBtn: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   counter: { color: '#fff', fontSize: FontSize.base, fontWeight: '600' },
   caption: { position: 'absolute', bottom: 40, left: 0, right: 0, alignItems: 'center', paddingHorizontal: 24 },
   captionName: { color: '#fff', fontWeight: '600', fontSize: FontSize.sm },
@@ -434,7 +491,9 @@ export default function GalleryScreen() {
           style={gridStyles.cellImg}
           contentFit="cover"
           transition={150}
+          cachePolicy="memory-disk"
           recyclingKey={item.id}
+          placeholder={{ blurhash: 'L6PZfSi_.AyE_3t7t7R**0o#DgR4' }}
           onError={(e) => {
             console.warn(`[Gallery] Image load error: id=${item.id}, fileName=${item.fileName}, url=${resolvedUrl}, rawUrl=${item.url}, error=`, e.error);
             setFailedImages((prev) => ({ ...prev, [item.id]: true }));

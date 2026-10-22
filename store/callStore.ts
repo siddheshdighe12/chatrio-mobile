@@ -2,7 +2,12 @@ import { create } from 'zustand';
 import * as Haptics from 'expo-haptics';
 import { getSocket } from '../lib/socket';
 import { callService } from '../services/call.service';
-import { CallParticipant, CallType, IncomingCallPayload } from '../types/call';
+import {
+  CallParticipant,
+  CallType,
+  IncomingCallPayload,
+  IncomingGroupCallPayload,
+} from '../types/call';
 
 export type CallStage =
   | 'IDLE'
@@ -28,9 +33,19 @@ interface CallState {
   isSpeakerOn: boolean;
   endReason: string | null;
 
+  // Group call additions
+  isGroupCall: boolean;
+  groupCallId: string | null;
+  groupName: string | null;
+  activeGroupParticipants: CallParticipant[];
+
   // Actions
   initiateCall: (conversationId: string, callType: CallType, recipient: CallParticipant) => Promise<string | null>;
   setIncomingCall: (payload: IncomingCallPayload) => void;
+  initiateGroupCall: (conversationId: string, callType: CallType, groupName: string) => Promise<string | null>;
+  joinGroupCall: (groupCallId: string, conversationId: string, callType: CallType, groupName: string) => Promise<boolean>;
+  leaveGroupCall: () => Promise<void>;
+  setIncomingGroupCall: (payload: IncomingGroupCallPayload) => void;
   acceptCall: () => Promise<boolean>;
   declineCall: () => Promise<void>;
   cancelCall: () => Promise<void>;
@@ -78,6 +93,11 @@ export const useCallStore = create<CallState>((set, get) => ({
   isSpeakerOn: false,
   endReason: null,
 
+  isGroupCall: false,
+  groupCallId: null,
+  groupName: null,
+  activeGroupParticipants: [],
+
   initiateCall: async (conversationId, callType, recipient) => {
     try {
       set({
@@ -92,6 +112,10 @@ export const useCallStore = create<CallState>((set, get) => ({
         isCameraEnabled: callType === 'VIDEO',
         isSpeakerOn: callType === 'VIDEO',
         endReason: null,
+        isGroupCall: false,
+        groupCallId: null,
+        groupName: null,
+        activeGroupParticipants: [],
       });
 
       const res = await callService.initiateCall({ conversationId, callType });
@@ -121,6 +145,103 @@ export const useCallStore = create<CallState>((set, get) => ({
     }
   },
 
+  initiateGroupCall: async (conversationId, callType, groupName) => {
+    try {
+      set({
+        stage: 'CONNECTING',
+        callId: null,
+        conversationId,
+        callType,
+        otherUser: { id: conversationId, displayName: groupName },
+        isIncoming: false,
+        duration: 0,
+        isMuted: false,
+        isCameraEnabled: callType === 'VIDEO',
+        isSpeakerOn: callType === 'VIDEO',
+        endReason: null,
+        isGroupCall: true,
+        groupCallId: null,
+        groupName,
+        activeGroupParticipants: [],
+      });
+
+      const res = await callService.initiateGroupCall({ conversationId, callType });
+      set({
+        stage: 'ACTIVE',
+        callId: res.groupCallId,
+        groupCallId: res.groupCallId,
+        token: res.token,
+        serverUrl: res.serverUrl,
+        roomName: res.livekitRoom,
+      });
+
+      return res.groupCallId;
+    } catch (err: any) {
+      console.error('Failed to initiate group call:', err);
+      const msg = err.response?.data?.error || err.message || 'Group call failed';
+      set({ stage: 'ENDED', endReason: msg });
+      setTimeout(() => {
+        if (get().stage === 'ENDED') get().resetCall();
+      }, 3000);
+      return null;
+    }
+  },
+
+  joinGroupCall: async (groupCallId, conversationId, callType, groupName) => {
+    try {
+      set({
+        stage: 'CONNECTING',
+        callId: groupCallId,
+        conversationId,
+        callType,
+        otherUser: { id: conversationId, displayName: groupName },
+        isIncoming: false,
+        duration: 0,
+        isMuted: false,
+        isCameraEnabled: callType === 'VIDEO',
+        isSpeakerOn: callType === 'VIDEO',
+        endReason: null,
+        isGroupCall: true,
+        groupCallId,
+        groupName,
+      });
+
+      const res = await callService.joinGroupCall(groupCallId);
+      set({
+        stage: 'ACTIVE',
+        token: res.token,
+        serverUrl: res.serverUrl,
+        roomName: res.livekitRoom,
+      });
+
+      return true;
+    } catch (err: any) {
+      console.error('Failed to join group call:', err);
+      const msg = err.response?.data?.error || err.message || 'Failed to join group call';
+      set({ stage: 'ENDED', endReason: msg });
+      setTimeout(() => {
+        if (get().stage === 'ENDED') get().resetCall();
+      }, 3000);
+      return false;
+    }
+  },
+
+  leaveGroupCall: async () => {
+    stopVibration();
+    const { groupCallId } = get();
+    if (groupCallId) {
+      try {
+        await callService.leaveGroupCall(groupCallId);
+      } catch (err) {
+        console.warn('Leave group call error:', err);
+      }
+    }
+    set({ stage: 'ENDED', endReason: 'Call ended' });
+    setTimeout(() => {
+      get().resetCall();
+    }, 1500);
+  },
+
   setIncomingCall: (payload) => {
     const current = get();
     // If already in a call, notify socket caller is busy
@@ -144,12 +265,64 @@ export const useCallStore = create<CallState>((set, get) => ({
       isCameraEnabled: payload.callType === 'VIDEO',
       isSpeakerOn: payload.callType === 'VIDEO',
       endReason: null,
+      isGroupCall: false,
+      groupCallId: null,
+      groupName: null,
+      activeGroupParticipants: [],
+    });
+  },
+
+  setIncomingGroupCall: (payload) => {
+    const current = get();
+    // If already in an active call, ignore background group call prompt
+    if (current.stage !== 'IDLE') return;
+
+    startVibration();
+
+    set({
+      stage: 'INCOMING_RINGING',
+      callId: payload.groupCallId,
+      groupCallId: payload.groupCallId,
+      conversationId: payload.conversationId,
+      callType: payload.callType,
+      otherUser: payload.initiator,
+      groupName: payload.groupName || 'Group Call',
+      isIncoming: true,
+      duration: 0,
+      isMuted: false,
+      isCameraEnabled: payload.callType === 'VIDEO',
+      isSpeakerOn: payload.callType === 'VIDEO',
+      endReason: null,
+      isGroupCall: true,
+      activeGroupParticipants: payload.activeParticipants || [payload.initiator],
     });
   },
 
   acceptCall: async () => {
     stopVibration();
-    const { callId } = get();
+    const { callId, isGroupCall, groupCallId } = get();
+
+    if (isGroupCall && groupCallId) {
+      set({ stage: 'CONNECTING' });
+      try {
+        const res = await callService.joinGroupCall(groupCallId);
+        set({
+          stage: 'ACTIVE',
+          token: res.token,
+          serverUrl: res.serverUrl,
+          roomName: res.livekitRoom,
+        });
+        return true;
+      } catch (err: any) {
+        console.error('Failed to accept group call:', err);
+        set({ stage: 'ENDED', endReason: err.response?.data?.error || 'Failed to connect' });
+        setTimeout(() => {
+          if (get().stage === 'ENDED') get().resetCall();
+        }, 2500);
+        return false;
+      }
+    }
+
     if (!callId) return false;
 
     set({ stage: 'CONNECTING' });
@@ -177,8 +350,8 @@ export const useCallStore = create<CallState>((set, get) => ({
 
   declineCall: async () => {
     stopVibration();
-    const { callId } = get();
-    if (callId) {
+    const { callId, isGroupCall } = get();
+    if (!isGroupCall && callId) {
       try {
         await callService.declineCall(callId);
       } catch (err) {
@@ -190,8 +363,14 @@ export const useCallStore = create<CallState>((set, get) => ({
 
   cancelCall: async () => {
     stopVibration();
-    const { callId } = get();
-    if (callId) {
+    const { callId, isGroupCall, groupCallId } = get();
+    if (isGroupCall && groupCallId) {
+      try {
+        await callService.leaveGroupCall(groupCallId);
+      } catch (err) {
+        console.warn('Cancel group call error:', err);
+      }
+    } else if (callId) {
       try {
         await callService.cancelCall(callId);
       } catch (err) {
@@ -203,8 +382,14 @@ export const useCallStore = create<CallState>((set, get) => ({
 
   endCall: async () => {
     stopVibration();
-    const { callId } = get();
-    if (callId) {
+    const { callId, isGroupCall, groupCallId } = get();
+    if (isGroupCall && groupCallId) {
+      try {
+        await callService.leaveGroupCall(groupCallId);
+      } catch (err) {
+        console.warn('Leave group call error:', err);
+      }
+    } else if (callId) {
       try {
         await callService.endCall(callId);
       } catch (err) {
@@ -239,6 +424,10 @@ export const useCallStore = create<CallState>((set, get) => ({
       isCameraEnabled: true,
       isSpeakerOn: false,
       endReason: null,
+      isGroupCall: false,
+      groupCallId: null,
+      groupName: null,
+      activeGroupParticipants: [],
     });
   },
 
@@ -254,6 +443,10 @@ export const useCallStore = create<CallState>((set, get) => ({
     socket.off('call:ended');
     socket.off('call:timeout');
     socket.off('call:busy');
+    socket.off('group-call:started');
+    socket.off('group-call:participant-joined');
+    socket.off('group-call:participant-left');
+    socket.off('group-call:ended');
 
     // 1. Incoming call from another user
     socket.on('call:incoming', (payload: IncomingCallPayload) => {
@@ -264,7 +457,6 @@ export const useCallStore = create<CallState>((set, get) => ({
     socket.on('call:accepted', async (data: { callId: string; callType: CallType }) => {
       const state = get();
       if (state.callId === data.callId) {
-        // Recipient accepted! If caller doesn't have token yet, fetch it
         if (!state.token) {
           try {
             const tokenRes = await callService.getCallToken(data.callId);
@@ -338,6 +530,51 @@ export const useCallStore = create<CallState>((set, get) => ({
         setTimeout(() => {
           if (get().stage === 'ENDED') get().resetCall();
         }, 2500);
+      }
+    });
+
+    // ── Group Call Socket Events ──────────────────────────────────────────────
+
+    // 8. Group call started in one of user's conversation rooms
+    socket.on('group-call:started', (data: IncomingGroupCallPayload) => {
+      const state = get();
+      if (state.stage === 'IDLE') {
+        get().setIncomingGroupCall(data);
+      }
+    });
+
+    // 9. Participant joined group call
+    socket.on('group-call:participant-joined', (data: { groupCallId: string; user: CallParticipant }) => {
+      const state = get();
+      if (state.isGroupCall && state.groupCallId === data.groupCallId) {
+        const existing = state.activeGroupParticipants.find((p) => p.id === data.user.id);
+        if (!existing) {
+          set({
+            activeGroupParticipants: [...state.activeGroupParticipants, data.user],
+          });
+        }
+      }
+    });
+
+    // 10. Participant left group call
+    socket.on('group-call:participant-left', (data: { groupCallId: string; userId: string }) => {
+      const state = get();
+      if (state.isGroupCall && state.groupCallId === data.groupCallId) {
+        set({
+          activeGroupParticipants: state.activeGroupParticipants.filter((p) => p.id !== data.userId),
+        });
+      }
+    });
+
+    // 11. Group call ended
+    socket.on('group-call:ended', (data: { groupCallId: string }) => {
+      const state = get();
+      if (state.isGroupCall && state.groupCallId === data.groupCallId) {
+        stopVibration();
+        set({ stage: 'ENDED', endReason: 'Group call ended' });
+        setTimeout(() => {
+          if (get().stage === 'ENDED') get().resetCall();
+        }, 1500);
       }
     });
   },
